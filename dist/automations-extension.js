@@ -2,9 +2,11 @@ const stringify = require("json-stable-stringify-without-jsonify");
 const crypto = require("crypto");
 const yaml_1 = require("../util/yaml");
 const data_1 = require("../util/data");
+
 function toArray(item) {
     return Array.isArray(item) ? item : [item];
 }
+
 var ConfigPlatform;
 (function (ConfigPlatform) {
     ConfigPlatform["ACTION"] = "action";
@@ -12,11 +14,13 @@ var ConfigPlatform;
     ConfigPlatform["NUMERIC_STATE"] = "numeric_state";
     ConfigPlatform["TIME"] = "time";
 })(ConfigPlatform || (ConfigPlatform = {}));
+
 var StateOnOff;
 (function (StateOnOff) {
     StateOnOff["ON"] = "ON";
     StateOnOff["OFF"] = "OFF";
 })(StateOnOff || (StateOnOff = {}));
+
 var ConfigService;
 (function (ConfigService) {
     ConfigService["TOGGLE"] = "toggle";
@@ -24,8 +28,10 @@ var ConfigService;
     ConfigService["TURN_OFF"] = "turn_off";
     ConfigService["CUSTOM"] = "custom";
 })(ConfigService || (ConfigService = {}));
+
 const WEEK = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const TIME_STRING_REGEXP = /^[0-9]{2}:[0-9]{2}:[0-9]{2}$/;
+
 class Time {
     constructor(time) {
         if (!time) {
@@ -82,13 +88,14 @@ class Time {
         return inverse ? !result : result;
     }
 }
+
 class InternalLogger {
     constructor(logger) {
         this.logger = logger;
     }
     log(level, ...args) {
         const data = args.map((item) => typeof item === 'string' ? item : stringify(item)).join(' ');
-        this.logger[level](`[AutomationsExtension] ${data}`);
+        // this.logger[level](`[AutomationsExtension] ${data}`);
     }
     debug(...args) {
         this.log('debug', ...args);
@@ -103,8 +110,9 @@ class InternalLogger {
         this.log('error', ...args);
     }
 }
+
 class AutomationsExtension {
-    constructor(zigbee, mqtt, state, publishEntityState, eventBus, settings, baseLogger) {
+    constructor(zigbee, mqtt, state, publishEntityState, eventBus, enableDisableExtension, restartCallback, addExtension, settings, logger, baseLogger) {
         this.zigbee = zigbee;
         this.mqtt = mqtt;
         this.state = state;
@@ -112,8 +120,8 @@ class AutomationsExtension {
         this.eventBus = eventBus;
         this.settings = settings;
         this.logger = new InternalLogger(baseLogger);
-        this.mqttBaseTopic = settings.get().mqtt.base_topic;
-        this.automations = this.parseConfig(settings.get().automations || {});
+        this.mqttBaseTopic = settings.get()?.mqtt?.base_topic || '';
+        this.automations = this.parseConfig(settings.get()?.automations || {});
         this.timeouts = {};
         this.logger.info('Plugin loaded');
         this.logger.debug('Registered automations', this.automations);
@@ -164,6 +172,9 @@ class AutomationsExtension {
         }, {});
     }
     checkTrigger(configTrigger, update, from, to) {
+        if (!update || !from || !to) {
+            return null;
+        }
         let trigger;
         let attribute;
         switch (configTrigger.platform) {
@@ -245,7 +256,7 @@ class AutomationsExtension {
         const entity = this.zigbee.resolveEntity(condition.entity);
         if (!entity) {
             this.logger.warning(`Condition not found for entity '${condition.entity}'`);
-            return true;
+            return false;
         }
         let currentCondition;
         let currentState;
@@ -254,20 +265,32 @@ class AutomationsExtension {
             case ConfigPlatform.STATE:
                 currentCondition = condition;
                 attribute = currentCondition.attribute || 'state';
-                currentState = this.state.get(entity)[attribute];
+                currentState = this.state.get(entity)?.[attribute];
                 if (currentState !== currentCondition.state) {
                     return false;
+                }
+                if (currentCondition.for) {
+                    const startTime = this.state.get(entity)?.[`_${attribute}_start`] || Date.now();
+                    if (Date.now() - startTime < currentCondition.for * 1000) {
+                        return false;
+                    }
                 }
                 break;
             case ConfigPlatform.NUMERIC_STATE:
                 currentCondition = condition;
                 attribute = currentCondition.attribute;
-                currentState = this.state.get(entity)[attribute];
+                currentState = this.state.get(entity)?.[attribute];
                 if (typeof currentCondition.above !== 'undefined' && currentState < currentCondition.above) {
                     return false;
                 }
                 if (typeof currentCondition.below !== 'undefined' && currentState > currentCondition.below) {
                     return false;
+                }
+                if (currentCondition.for) {
+                    const startTime = this.state.get(entity)?.[`_${attribute}_start`] || Date.now();
+                    if (Date.now() - startTime < currentCondition.for * 1000) {
+                        return false;
+                    }
                 }
                 break;
         }
@@ -280,7 +303,7 @@ class AutomationsExtension {
                 this.logger.debug(`Destination not found for entity '${action.entity}'`);
                 continue;
             }
-            const currentState = this.state.get(destination).state;
+            const currentState = this.state.get(destination)?.state;
             let newState;
             switch (action.service) {
                 case ConfigService.TURN_ON:
@@ -352,7 +375,7 @@ class AutomationsExtension {
         this.runActionsWithConditions(automation.condition, automation.action);
     }
     findAndRun(entityId, update, from, to) {
-        const automations = this.automations[entityId];
+        const automations = this.automations?.[entityId];
         if (!automations) {
             return;
         }
@@ -362,11 +385,16 @@ class AutomationsExtension {
     }
     async start() {
         this.eventBus.onStateChange(this, (data) => {
-            this.findAndRun(data.entity.name, data.update, data.from, data.to);
+            if (data?.entity?.name && data.update && data.from && data.to) {
+                this.findAndRun(data.entity.name, data.update, data.from, data.to);
+            } else {
+                this.logger.warning('Incomplete data received from eventBus.onStateChange', data);
+            }
         });
     }
     async stop() {
         this.eventBus.removeListeners(this);
     }
 }
+
 module.exports = AutomationsExtension;
